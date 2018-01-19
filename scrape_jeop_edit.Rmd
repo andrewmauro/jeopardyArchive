@@ -1,0 +1,296 @@
+---
+title: "scrape jeop"
+author: "Andrew Mauro"
+date: "May 9, 2017"
+output: html_document
+---
+
+
+Purpose: create a function to scrape the Jeopardy Archive (http://j-archive.com/) and obtain a database of jeopardy clue categories, answers, and questions. 
+
+Sources/Info: Starter code was obtained from data.world (https://data.world/mkearney/jeopardy) and updated to scrape matching question and answer values, and in addition obtain clue categories for classification. Regular expression analysis was then performed to group clues into broader categories for the purposes of organization and review.
+
+1. Load Packages and create lookup data frames
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+#install if needed
+#install.packages("qdapRegex")
+#install.packages("rvest")
+#install.packages("dplyr")
+#install.packages("tidyr")
+#install.packages("data.table")
+
+library(rvest)
+library(dplyr)
+library(tidyr)
+library(data.table)
+library(qdapRegex)
+
+
+
+#create category lookup table
+catlookup <- data.frame(round = c(rep("J",6), rep("DJ", 6), "FJ"),
+                        category = c(seq(1:6), seq(1:6), "NA"),
+                        catlookup = c(seq(1:13))
+                        )
+
+#create value lookup table
+vallookup <- data.frame(round = c(rep("J",5), rep("DJ", 5), "FJ"),
+                        clue_pos = c(seq(1:5), seq(1:5), "NA"),
+                        value = c(seq(200,1000, 200), seq(400,2000, 400), "FINAL")
+                        )
+```
+
+
+2. Create Functions for scraping jeopardy data
+
+```{r}
+
+#multiple gsub function
+mgsub <- function(pattern, replacement, x, ...) {
+        if (length(pattern)!=length(replacement)) {
+        stop("pattern and replacement do not have the same length.")
+                }
+        result <- x
+        for (i in 1:length(pattern)) {
+                result <- gsub(pattern[i], replacement[i], result, ...)
+                }
+        result
+        }
+
+
+#Jeopardy Function
+
+get_jeopardy <- function(gid) {
+  
+        get_value <- function(x) {
+                value <- x %>%
+                        html_nodes("td.clue_value_daily_double") %>%
+                        html_text()
+                if (!isTRUE(length(value) > 0L)) {
+                        value <- x %>%
+                                html_nodes("td.clue_value") %>%
+                                html_text()
+                }
+                value
+                }
+            
+        get_answer <- function(x) {
+                x %>%
+                        html_attr("onmouseover") %>%
+                        read_html() %>%
+                        html_nodes("em.correct_response") %>%
+                        html_text()
+                }
+            
+        get_category <- function(x) {
+                x %>%
+                        html_attr("onmouseover") %>%
+                        read_html() %>%
+                        html_nodes("table.clue_header") %>%
+                        html_text()
+                }
+        
+        ## send GET request (and store response)
+        r <- httr::GET(paste0(
+                "http://www.j-archive.com/showgame.php?game_id=", gid))
+            
+        ## read as HTML
+        jeop.html <- r[["content"]] %>%
+                rawToChar() %>%
+                read_html()
+         
+        ## parse game title
+        title <- jeop.html %>%
+                html_nodes("title")%>%
+                html_text()
+        
+            
+        ## parse clues
+        clue <- jeop.html %>%
+                html_nodes("table td.clue_text") %>%
+                html_text() %>%
+                lapply(paste, collapse = " ") %>%
+                unlist(use.names = FALSE)
+            
+        ## parse answers
+        answer <- jeop.html %>%
+                html_nodes("table tr td div") %>%
+                lapply(get_answer) %>%
+                lapply(paste, collapse = " ") %>%
+                unlist(use.names = FALSE)
+            
+        ## obtain categories and values
+        #parse clue ids and obtain values
+                clue_id <- jeop.html %>%
+                        html_nodes("table tr td div") %>%
+                        html_attr("onmouseover")
+                clue_id <- substr(clue_id, 9,19)
+                clue_id <- mgsub(clue_id, pattern = c(",", " ", "'","clue_"), replacement = c("","","",""))
+                clue_id <- as.data.frame(clue_id) %>% separate(clue_id,c("round","category","clue_pos"), "_", fill = "right")
+                clue_id$order <- seq(1:nrow(clue_id))
+                clue_id <- merge(clue_id, catlookup, by = c("round","category"), sort = FALSE)
+                clue_id <- merge(clue_id, vallookup, by = c("round","clue_pos"), sort = FALSE)
+                clue_id <- arrange(clue_id, order)
+                value <- as.character(clue_id[,6])
+        #parse categories
+                category <- as.data.frame(jeop.html %>%
+                        html_nodes("table td.category_name") %>%
+                        html_text())
+                category$catlookup <- seq(1:nrow(category))
+                category <- merge(clue_id, category, by = "catlookup")
+                category <- arrange(category, order)
+                category <- as.character(category[,7])
+        
+        ## create data frame
+                data.frame(game = rep(title, nrow(clue_id)),
+                        category = category,
+                        value = value,
+                        answer = answer,
+                        clue = clue,
+                        stringsAsFactors = FALSE
+                )
+                
+                
+        }
+
+## Get Jeopardy data or if error return empty data frame
+get_jeop <- function(x) {
+    dat <- tryCatch(
+        get_jeopardy(x),
+        error = function(e) return(NULL))
+    if (is.null(dat)) {
+        dat <- data.frame(
+            category = character(),
+            value = character(),
+            answer = character(),
+            clue = character(),
+            stringsAsFactors = FALSE)
+    }
+    dat
+}
+
+```
+
+3. Apply function to game ids and save output
+
+```{r}
+
+## Select a subset of questions
+j <- lapply(5600:5646, get_jeop)
+
+
+## collapse list into single data frame
+j <- do.call("rbind", j)
+
+## count rows
+nrow(j)
+
+## check data
+check <- j[sample(seq_len(NROW(j))), ]
+check[1:50,]
+
+## Save jeop data into data directory.
+write.csv(j, "jeop_test.csv")
+
+```
+
+
+4. Data Clean
+
+```{r}
+
+#Obtain Gamedates
+j$gameDate <- as.Date(rm_between(j$game ,"J! ", "aired "), format = "%Y-%m-%d")
+j2 <- j
+###CATEGORY CLEANING
+
+#default category is general, replace based on text analysis
+cats <- as.data.frame(unique(j2$category))
+names(cats) <- "category"
+cats$category <- as.character(cats$category)
+cats$grouping <- "General"
+
+#History Analysis
+#general
+cats[grep('HISTORY|CENTURY|DECADE|HISTORIC|WAR|BATTLE|GENERALS|KING|ROYAL|MONARCH|QUEEN|PRINCE|PRINCESS|PATRIOT', cats$category), "grouping"] <- "History"
+#us
+cats[grep('AMERICAN HISTORY|U.S. HISTORY|U.S.|AMERICAN', cats$category), "grouping"] <- "U.S. History"
+#asian
+cats[grepl('ASIAN HISTORY', cats$category), "grouping"] <- "Asian History"
+#european
+cats[grepl('EUROPEAN HISTORY', cats$category), "grouping"] <- "European History"
+#Presidents
+cats[grepl('PRESIDENT|FOUNDING FATHER|WHITE HOUSE', cats$category), "grouping"] <- "Presidents" 
+
+#Art
+cats[grepl('^ART| ART | ART$|MUSEUM|RENAISSANCE', cats$category), "grouping"] <- "Art"
+
+#Literature
+cats[grepl('LITERATURE|BOOK|AUTHOR|WRITER|BIOGRAPH|POET|FICTION|BESTSELLER|ENLISH LIT|AMERICAN LIT|FOREIGN LIT|PHILOSOPH', cats$category), "grouping"] <- "Literature"
+
+#Film
+cats[grepl('MOVIE|FILM|DIRECTOR|ACTOR|ACTRESS|OSCARS|ACADEMY AWARD', cats$category), "grouping"] <- "Movies"
+
+#Sports
+cats[grepl('SPORTS|BASEBALL|FOOTBALL|BASKETBALL|SOCCER|HOCKEY|ATHLETE|NFL|NBA|MLB|NHL|MLS|GOLF|ESPN|TRACK & FIELD|OLYMPIC', cats$category), "grouping"] <- "Sports"
+
+#Music
+cats[grepl('MUSIC|SONG|SONGWRITER|COMPOSER|CLASSICAL MUSIC|CLASSICAL|SOUNDTRACK|ROCK STAR|R&B|JAZZ|HIP HOP|RAP |POP |ROCK', cats$category), "grouping"] <- "Music"
+
+#Geography
+cats[grepl('GEOGRAPHY|CAPITAL|STATES|COUNTRY|COUNTRIES|AIRPORT|COUNTIES|CITY|CITIES|MAP|GEOGRAPHIC|EUROPE |ASIA |AFRICA|ANTARCTICA |LATIN AMERICA |NORTH AMERICA |FLAG|TRAVEL|THE U.N.|TRANSPORTATION|ISLAND|OCEANIA|LAKE|RIVER|SEA|PARK', cats$category), "grouping"] <- "Geography"
+
+#Country Music
+cats[grepl('WOMEN OF COUNTRY|COUNTRY SINGERS|COUNTRY DIVAS|NO. 1 COUNTRY HITS|COUNTRY SINGERS|NO. 1 COUNTRY HITS|COUNTRY SINGER|COUNTRY SINGERS WHO ACT|COUNTRY FEMALE VOCALIST OF THE YEAR GRAMMYS|CLASSIC COUNTRY|UNLIKELY COUNTRY TOP 40 PERFORMERS', cats$category), "grouping"] <- "Music"
+
+#bible
+cats[grepl('BIBLE|BIBLICAL|APOSTLE|TESTAMENT|GOSPEL', cats$category), "grouping"] <- "Bible"
+
+#Religion
+cats[grepl('RELIGION|RELIGIOUS|ISLAM|MUSLIM|JEW|CATHOLIC|CHRISTIAN|REFORMATION|PROVERB', cats$category), "grouping"] <- "Religion"
+
+#Science and Academics
+cats[grepl('SCIENCE|CHEMISTRY|BIOLOGY|PHYSICS|ELEMENTS|PERIODIC TABLE|ANIMAL|COMPUTING|COMPUTERS|PLANET|ASTRONOMY|BODY|OLOGY|ROBOT|DOCTOR|SPACE |MARS|MOON|BIRDS|FISH|AQUATIC|MAMMAL|MEDICAL|MEDICINE', cats$category), "grouping"] <- "Science"
+
+#Year
+cats[grepl('^[0-9][0-9][0-9][0-9]$', cats$category),"grouping"] <-"Year"
+
+#Word and Letter Play
+cats[grepl('\\"[A-Z]+\\"', cats$category), "grouping"] <- "Word and Letter Play"
+cats[grepl('\\"+[A-Z]\\"', cats$category), "grouping"] <- "Word and Letter Play"
+
+#Food and Drink
+cats[grepl('COOKING|FOOD|DRINK|COFFEE|WINE|BEER|WHISKEY|SCOTCH|LIQOUR|POTENT POTABLE|GROCERY|FRUIT|VEGETABLE|PROTEIN|PASTA|COOK|CEF|DINING|DISHES|CUISINE', cats$category), "grouping"] <- "Food and Drink"
+
+#TV and Pop Culture
+cats[grepl('CELEBRIT|GAMES|TV|TELEVISION|HBO|SHOWTIME|BUSINESS|ETIQUETTE|DIGEST|COLLEGE|COLLEGIATE|GAME|TOYS|COMEDY|JOURNALISM|RADIO|CROSSWORD|BEFORE & AFTER|NEWSPAPERS|CHARACTER|FLOWER|NEWS|TABLOID|SCHOOL|AMERICANA', cats$category), "grouping"] <- "Pop Culture"
+
+#Government and Politics
+cats[grepl('GOVERNMENT|POLITIC|ELECTION|CAMPAIGN|MONEY|VEEP|POTUS|SUPREME COURT|JUSTICE|LAW', cats$category), "grouping"] <- "Government and Politics"
+
+#How Many?
+(1 - (nrow(cats[cats$grouping == "General",]) / nrow(cats))) * 100
+
+#unclassified analysis
+unclassed <- cats[cats$grouping == "General",]
+write.csv(unclassed, "unclassed.csv")
+
+#str and write
+str(cats)
+write.csv(cats, "cats.csv")
+
+#merge and write
+val <- nrow(j2)
+j2 <- merge(j2, cats, by = "category")
+nrow(j2) == val
+write.csv(j2, "jeopardy.csv")
+
+```
+
+
+Conclusion: Cleaned jeopardy csv file can be uploaded to a flash card application website (e.g. https://quizlet.com/) by category for an on the go jeopardy game.
